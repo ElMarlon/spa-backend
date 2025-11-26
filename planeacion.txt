@@ -1,0 +1,352 @@
+1) Objetivo del sistema (resumen)
+
+Crear una plataforma para un centro de alisados donde:
+
+Clientes se registran, reservan servicios (indican qué quieren), ven alisadoras disponibles por fecha/hora/skill, eligen, pagan y reciben una factura electrónica por correo.
+
+Las alisadoras ven su agenda, pueden cancelar citas (con notificación al cliente y reasignación).
+
+Sistema modular (microservicios) para aprender patterns empresariales: colas, mensajería, escalabilidad, testing, CI/CD.
+
+2) Tech stack recomendado (para practicar JS / TS y patrones empresariales)
+
+Lenguaje: TypeScript (front + back) — productividad y buen typing.
+
+Frontend: React + Vite + TypeScript. Data fetching con TanStack Query (React Query). Estado local con Zustand (o Redux si quieres más complejidad).
+
+UI: Tailwind CSS para acelerar prototipado + componentes hechos a mano para aprender CSS. (Si quieres practicar CSS puro, haz algunos layouts sin Tailwind).
+
+Backend (microservicios): NestJS (TypeScript) por estructura empresarial y soporte nativo a microservicios; alternativamente Express + libraries si prefieres minimal.
+
+ORM: Prisma (fácil con TypeScript) o TypeORM. Yo recomiendo Prisma.
+
+Base de datos: PostgreSQL.
+
+Cache/Colas: Redis (cache, sessions) + BullMQ (colas de trabajos como envíos de email, generación de facturas). Opcional: RabbitMQ o NATS para mensajería entre microservicios.
+
+Pagos: integrar pasarela de pagos (Stripe, PayU, o la que uses localmente) — durante práctica usa un modo sandbox.
+
+Emails: servicio SMTP o proveedor (SendGrid, Mailgun) para enviar facturas al correo.
+
+Facturación electrónica: generar PDF/JSON con la info y enviar a un proveedor autorizado (en producción en Colombia se integraría con DIAN o un proveedor autorizado). Para practicar, genera PDF (puppeteer / PDFKit) y envíalo por correo; después integra proveedor real.
+
+Contenedores / Orquestación: Docker Compose para local; Kubernetes para despliegue si quieres aprender infra.
+
+Testing: Jest (unit) + Supertest (API) + Playwright o Cypress (E2E).
+
+CI/CD: GitHub Actions.
+
+Monorepo: Nx o Turborepo (facilita compartir tipos y DTOs entre servicios y frontend).
+
+3) Arquitectura de microservicios (alto nivel)
+
+Servicios independientes (cada uno en su repo o carpeta en monorepo):
+
+auth-service
+
+Registro/login, JWT + refresh tokens, roles (cliente, alisadora, admin).
+
+users-service
+
+Perfiles (clientes y alisadoras), skills, documentos, calificaciones.
+
+staff-service
+
+Gestión de alisadoras, habilidades (skill), horarios preferidos, disponibilidad recurrente.
+
+availability-service
+
+Genera y consulta slots disponibles filtrando por skill, fecha y horarios ocupados.
+
+booking-service
+
+Crear/actualizar/cancelar reservas. Valida disponibilidad y crea pagos pendientes.
+
+payments-service
+
+Integración con pasarela, webhooks, estado de pago.
+
+invoice-service
+
+Genera factura electrónica (PDF/JSON), persistencia y envío por correo (email-service); también registra datos para contabilidad.
+
+notification-service
+
+Envía emails/SMS/push. Consume eventos (citas creadas/canceladas/pagas).
+
+gateway / api-gateway
+
+Punto único para frontend, manejo de autenticación y ruteo hacia microservicios (opcional: usar nginx + jwt proxy).
+
+admin-service (opcional)
+
+Gestión administrativa (reportes, conciliaciones).
+
+worker / queue
+
+Ejecuta trabajos pesados: generación de PDFs, reintentos, envío masivo.
+
+Comunicación:
+
+Sincrónica: HTTP/REST (o GraphQL) desde frontend al gateway; gateway a servicios.
+
+Asincrónica: eventos publicados en Redis/BullMQ o brokers (RabbitMQ) para notificaciones, generación de factura, notificar pago, reasignación de citas.
+
+4) Modelo de datos (esquema simplificado)
+
+Tablas principales (Postgres):
+
+users (id, email, password_hash, name, role, phone, created_at)
+
+services (id, name, duration_minutes, base_price) — ej. “Alisado corto”, “Alisado largo”
+
+skills (id, name) — ej. “Keratin”, “Nano”
+
+staff_skills (id, staff_id, skill_id)
+
+staff_schedules (id, staff_id, weekday, start_time, end_time, recurring)
+
+bookings (id, client_id, staff_id, service_id, start_datetime, end_datetime, status, price, created_at)
+
+payments (id, booking_id, provider, amount, status, transaction_id)
+
+invoices (id, booking_id, invoice_number, pdf_url, status, issued_at)
+
+notifications (id, user_id, type, payload, status, created_at)
+
+5) Endpoints (ejemplos REST) — booking-service & availability-service
+
+Availability:
+
+GET /availability?serviceId=...&date=2025-12-01&skillId=...
+Respuesta: lista de slots { start: ISO, end: ISO, staffId, staffName }
+
+Booking:
+
+POST /bookings
+Body: { clientId, serviceId, desiredStart, staffId (opcional) }
+Response: { bookingId, status: 'PENDING_PAYMENT', price }
+
+POST /bookings/:id/pay -> redirige a payments-service o crea payment intent.
+
+POST /bookings/:id/cancel -> cancela; publica evento booking.cancelled; si lo cancela la alisadora -> notif cliente + opción reasignar.
+
+Staff dashboard:
+
+GET /staff/:id/bookings?from=...&to=...
+
+PATCH /staff/:id/bookings/:bookingId/cancel
+
+Invoices:
+
+GET /invoices/:id/pdf
+
+POST /invoices/generate (trigger desde booking cuando pago completado)
+
+6) Flujo del caso de uso principal (cliente reserva + factura)
+
+Cliente se registra y autentica.
+
+Cliente elige “servicio” y fecha/horario deseado.
+
+Frontend pide GET /availability -> backend combina horarios de staff que tienen la skill, calendario ocupado y devuelve slots.
+
+Cliente selecciona slot y confirma -> POST /bookings (status PENDING_PAYMENT).
+
+Frontend inicia pago con payments-service (p. ej. Stripe Checkout). Al completarse, payments-service envía webhook a booking-service indicando pago OK.
+
+Booking-service marca booking como CONFIRMED, calcula price final, publica evento booking.paid.
+
+invoice-service, suscrito al evento, genera factura electrónica (PDF), la guarda y solicita a notification-service enviar correo con la factura al cliente.
+
+La alisadora ve la cita en su dashboard. Si cancela:
+
+booking-service cambia estado a CANCELLED, publica booking.cancelled.
+
+notification-service envía correo al cliente e intenta reasignar (opcional: mostrar alternativas al cliente o auto-asignar otra alisadora disponible).
+
+7) Consideraciones para facturación electrónica (práctica)
+
+Para practicar: genera un PDF con los datos fiscales (número, totales, ítems) usando PDFKit o puppeteer (render HTML a PDF). Envía por correo.
+
+En producción en Colombia: deberás integrar con DIAN o un proveedor autorizado — eso requiere cumplimiento legal. Para aprender, implementa la generación del documento y la persistencia y deja la integración real como siguiente paso.
+
+8) Seguridad / Auth
+
+JWT (access token corto) + refresh token (long). Guardar refresh en DB con revocación.
+
+Roles y guardas en NestJS (cliente / staff / admin).
+
+Validación y sanitización de inputs (class-validator).
+
+Rate limiting en API Gateway.
+
+HTTPS siempre.
+
+9) Infra local (Docker Compose mínimo)
+
+servicios: postgres, redis, rabbitmq (opcional), mailhog (testing emails), api-gateway, auth-service, booking-service, frontend (vite).
+
+Un docker-compose.yml te permite levantar todo y practicar microservicios.
+
+10) Estrategia de pruebas
+
+Unit tests (Jest) por microservicio.
+
+Integration tests (Supertest) para endpoints.
+
+E2E (Playwright/Cypress): flujo registro → booking → pago (sandbox) → ver factura.
+
+Tests de contrato entre servicios (pact / contract tests) para que los cambios no rompan integraciones.
+
+11) Plan de trabajo escalonado (práctico, para aprender paso a paso)
+
+Cada bloque = sprint de 1 semana aprox según dedicación.
+
+Sprint 0 — Setup
+
+Crea monorepo (Nx o Turborepo) o carpetas separadas.
+
+Configura Docker Compose con Postgres y Redis.
+
+Inicializa repos/services: auth, booking, availability, notification, frontend.
+
+Configura CI básico (lint + tests).
+
+Sprint 1 — Auth y registro
+
+auth-service: register, login, JWT, middleware.
+
+Frontend: formulario de registro/login, manejo de tokens (localStorage + refresh).
+
+Tarea práctica: implementar password hashing, pruebas unitarias para auth.
+
+Sprint 2 — Modelos básicos y servicios
+
+Implementa tablas users, services, skills en users-service.
+
+Frontend: crear CRUD para servicios (solo admin).
+
+Tarea práctica: crear seeders y scripts para crear staff con skills y horarios.
+
+Sprint 3 — Availability + Booking básico
+
+availability-service: calcula slots disponibles (toma schedules de staff y bookings).
+
+booking-service: crear booking (sin pagos aún), validación de concurrencia (locks o transaction).
+
+Frontend: página de reservar — selecciona servicio, fecha y slot.
+
+Tarea práctica: simular 2 clientes reservando mismo slot y manejar race condition.
+
+Sprint 4 — Payments (sandbox)
+
+Integrar Stripe (modo test) o una pasarela que conozcas.
+
+payments-service: crear payment intent, webhook para confirmar pago.
+
+booking-service reacciona al webhook y confirma booking.
+
+Frontend: checkout flow (redirect o modal).
+
+Sprint 5 — Invoice generation & Email
+
+invoice-service: generar PDF (puppeteer o PDFKit) tras pago confirmado.
+
+notification-service: enviar correo con factura (usando MailHog en local).
+
+Frontend: mostrar link a factura en perfil cliente.
+
+Tarea práctica: programar worker para reintentos de emails fallidos.
+
+Sprint 6 — Staff dashboard & cancelaciones
+
+Staff puede ver su agenda por día/semana.
+
+Staff cancela cita -> booking-service publica evento -> notification-service notifica cliente y propone opciones (reasignación).
+
+Tarea práctica: implementar endpoint que sugiere alternativas (otros staff con skill libre en la misma franja).
+
+Sprint 7 — Hardening & deploy
+
+Test coverage, logging con correlación de request-id, metrics (Prometheus).
+
+Docker images, despliegue en cloud (Heroku/GCP/AWS) o minikube.
+
+CI/CD pipeline completo.
+
+12) Ejemplos concretos (código conceptual rápido)
+
+Ejemplo de endpoint de availability (pseudocódigo):
+
+// GET /availability?serviceId=1&date=2025-12-05
+// Respuesta: [{ start: "2025-12-05T10:00:00", end: "...", staffId, staffName }]
+
+
+Algoritmo: por cada staff con skill para el service:
+
+tomar schedule del día (ej. 9:00–17:00)
+
+quitar bookings ocupados
+
+dividir en slots por duración del servicio
+
+devolver slots libres
+
+Ejemplo de booking flow (pseudocódigo):
+
+client -> POST /bookings {serviceId, desiredStart, staffId}
+
+booking-service comienza transaction:
+
+verifica que slot aún disponible
+
+crea booking row status=PENDING_PAYMENT
+
+retorna price + payment_intent
+
+cliente paga -> payments webhook -> booking-service actualiza a CONFIRMED
+
+13) Tareas prácticas puntuales (lista corta para empezar hoy)
+
+Inicializa monorepo con Vite React + NestJS starter (TS). Configura eslint+prettier.
+
+Crea auth-service: registro + login + JWT. Haz 3 tests unitarios.
+
+Crea frontend: formulario de registro y login que consume auth-service.
+
+Crea tablas users, services. Seed 3 servicios (corto/medio/largo).
+
+Implementa availability-service simple: crear schedules para una alisadora y endpoint GET availability que devuelva slots de 1 hora.
+
+Implementa booking-service con endpoint POST booking que reserva un slot (sin pagos aún).
+(Estos 6 puntos son el camino más corto hacia un MVP básico; hazlos en orden.)
+
+14) Recomendaciones para aprender JS y frameworks mientras desarrollas
+
+Usa TypeScript desde el inicio (te obliga a pensar tipos y DTOs).
+
+Escribe tests desde el primer endpoint. Test-driven learning es muy formativo.
+
+Haz todo en pequeños commits y PRs — simula ambiente empresarial.
+
+Añade logs estructurados (JSON) con request-id; te ayudará a depurar microservicios.
+
+Integra Postman/Insomnia para probar APIs.
+
+Implementa al menos un worker que use BullMQ (ej. enviar mail) para practicar colas.
+
+15) ¿Quieres que te entregue algo ahora?
+
+Puedo inmediatamente:
+
+Generarte esqueleto de monorepo (repos o carpetas) con:
+
+auth-service (NestJS) + Dockerfile,
+
+booking-service (NestJS skeleton),
+
+frontend React (Vite) con formularios de login/registro,
+
+docker-compose.yml (Postgres + Redis + MailHog).
+O puedo devolverte solo el primer sprint: el código completo de auth-service + frontend de registro/login listo para ejecutar.
